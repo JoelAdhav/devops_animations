@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { CheckCircle2, Circle, FileText, Folder, FolderTree } from 'lucide-react'
 import type { Lesson } from '../types'
@@ -6,7 +6,9 @@ import { Shell, Tip } from '../../components/Story'
 import { Scene, Txt } from '../../components/Illustrations'
 import { bouncy, spring } from '../../lib/motion'
 import { useLoop } from '../../lib/useLoop'
-import { HOME, base, children, initialFs, pretty, run, type Fs } from '../../lib/vfs'
+import { HOME, base, children, initialFs, pretty, type Fs } from '../../lib/vfs'
+import { Terminal } from '../../components/Terminal'
+import { scenarios } from './LinuxFsSims'
 
 /* ------------------------------------------------------------------ scene */
 
@@ -213,8 +215,6 @@ const CHALLENGES: { text: string; check: (fs: Fs, cwd: string) => boolean }[] = 
   { text: 'Write "v1" into ~/version.txt using echo and >', check: (fs) => fs[`${HOME}/version.txt`]?.content?.trim() === 'v1' },
 ]
 
-type Line = { prompt?: string; text: string; err?: boolean }
-
 function TreeView({ fs, cwd }: { fs: Fs; cwd: string }) {
   const rows: { path: string; depth: number }[] = []
   const walk = (d: string, depth: number) => {
@@ -254,90 +254,30 @@ function TreeView({ fs, cwd }: { fs: Fs; cwd: string }) {
 function TerminalPlayground() {
   const [fs, setFs] = useState<Fs>(initialFs)
   const [cwd, setCwd] = useState(HOME)
-  const [lines, setLines] = useState<Line[]>([{ text: 'Welcome! Type "help" to see commands. Try the challenges on the right.' }])
-  const [input, setInput] = useState('')
-  const [history, setHistory] = useState<string[]>([])
-  const [hIdx, setHIdx] = useState(-1)
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight })
-  }, [lines])
+  const [round, setRound] = useState(0)
 
   const done = useMemo(() => CHALLENGES.map((c) => c.check(fs, cwd)), [fs, cwd])
-
-  function submit() {
-    const line = input.trim()
-    const prompt = `joel@server:${pretty(cwd)}$`
-    setInput('')
-    setHIdx(-1)
-    if (!line) {
-      setLines((l) => [...l, { prompt, text: '' }])
-      return
-    }
-    setHistory((h) => [line, ...h].slice(0, 50))
-    const r = run(fs, cwd, line)
-    setFs(r.fs)
-    setCwd(r.cwd)
-    if (r.clear) setLines([])
-    else setLines((l) => [...l, { prompt, text: line }, ...r.out.filter((o, k) => o !== '' || k > 0).map((o) => ({ text: o, err: r.err }))])
-  }
 
   function reset() {
     setFs(initialFs())
     setCwd(HOME)
-    setLines([{ text: 'Sandbox reset.' }])
+    setRound((n) => n + 1)
   }
 
   return (
     <div className="card stage">
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
-        <div className="terminal" onClick={() => inputRef.current?.focus()} style={{ cursor: 'text' }}>
-          <header>
-            <i />
-            <i />
-            <i />
-            <span style={{ marginLeft: 6 }}>joel@server (sandbox: nothing here is real)</span>
-          </header>
-          <div className="body" ref={bodyRef} style={{ height: 300 }}>
-            {lines.map((l, i) => (
-              <div key={i} className={l.err ? 'err' : ''}>
-                {l.prompt && <span className="warn">{l.prompt} </span>}
-                {l.text}
-              </div>
-            ))}
-            <div style={{ display: 'flex', gap: 6 }}>
-              <span className="warn">joel@server:{pretty(cwd)}$</span>
-              <input
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') submit()
-                  else if (e.key === 'ArrowUp') {
-                    e.preventDefault()
-                    const n = Math.min(hIdx + 1, history.length - 1)
-                    if (n >= 0) {
-                      setHIdx(n)
-                      setInput(history[n])
-                    }
-                  } else if (e.key === 'ArrowDown') {
-                    e.preventDefault()
-                    const n = hIdx - 1
-                    setHIdx(Math.max(n, -1))
-                    setInput(n >= 0 ? history[n] : '')
-                  }
-                }}
-                aria-label="Terminal input"
-                spellCheck={false}
-                autoCapitalize="off"
-                autoComplete="off"
-                style={{ flex: 1, background: 'transparent', border: 0, outline: 'none', color: '#7cc4ff', fontFamily: 'var(--mono)', fontSize: 12.5, padding: 0 }}
-              />
-            </div>
-          </div>
-        </div>
+        <Terminal
+          key={round}
+          fs={fs}
+          cwd={cwd}
+          onRun={(r) => {
+            setFs(r.fs)
+            setCwd(r.cwd)
+          }}
+          banner={[round ? 'Sandbox reset.' : 'Welcome! Type "help" to see commands. Try the challenges on the right.']}
+          height={300}
+        />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div className="mini-table">
             <header>
@@ -558,7 +498,11 @@ $ du -sh /var/log/*                     # size of each item`}</Shell>
     ],
   },
   Playground: TerminalPlayground,
-  playgroundIntro: 'A safe pretend Linux terminal. Type real commands (↑ for history). The tree updates live. Complete the challenges.',
+  playgroundIntro: 'A safe pretend Linux terminal. Type real commands (↑ for history, Tab to complete). The tree updates live. Complete the challenges.',
+  simulation: {
+    intro: 'Real tickets on a real-feeling server. Read the ticket, use the terminal, tick off every goal. Pipes, sudo, Tab completion and permissions all work like on Ubuntu.',
+    scenarios,
+  },
   terms: [
     { term: 'Root ( / )', def: 'The top of the Linux directory tree.' },
     { term: 'Home directory ( ~ )', def: 'Your personal folder, e.g. /home/joel.' },

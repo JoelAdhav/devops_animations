@@ -1,10 +1,13 @@
-import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, BookOpen, Check, Clock, Gamepad2, ListChecks, MessagesSquare, Terminal } from 'lucide-react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { motion } from 'motion/react'
+import { ArrowLeft, ArrowRight, BookOpen, Check, Clapperboard, Clock, Gamepad2, ListChecks, MessagesSquare, Terminal, TerminalSquare } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { findLesson, lessons } from '../lessons/registry'
 import { toggleCompleted, useCompleted } from '../lib/storage'
 import { ScrollStory } from '../components/Story'
 import { Quiz } from '../components/Quiz'
+import { SimLab } from '../components/SimLab'
+import { spring } from '../lib/motion'
 
 function Block({ icon, tone, title, intro, children }: { icon: ReactNode; tone: string; title: string; intro?: string; children: ReactNode }) {
   return (
@@ -29,6 +32,7 @@ export default function LessonPage() {
   const { id } = useParams()
   const lesson = findLesson(id)
   const completed = useCompleted()
+  const [params, setParams] = useSearchParams()
 
   if (!lesson) {
     return (
@@ -47,8 +51,13 @@ export default function LessonPage() {
   const prev = lessons[index - 1]
   const next = lessons[index + 1]
   const isDone = completed.includes(lesson.id)
-  const { Playground, story } = lesson
+  const { Playground, story, simulation } = lesson
   const Icon = lesson.icon
+  const tab = simulation && params.get('tab') === 'sim' ? 'sim' : 'learn'
+  const tabs = [
+    { id: 'learn', label: 'Animation', icon: Clapperboard, note: story ? `${story.sections.length} parts` : undefined },
+    { id: 'sim', label: 'Simulation', icon: TerminalSquare, note: simulation ? `${simulation.scenarios.length} tickets` : undefined },
+  ] as const
 
   return (
     <article style={{ maxWidth: 1180 }}>
@@ -69,12 +78,39 @@ export default function LessonPage() {
         </div>
         <h1>{lesson.title}</h1>
         <p>{lesson.summary}</p>
-        {story && (
+        {story && tab === 'learn' && (
           <p style={{ fontSize: 14 }} className="muted">
             Scroll down: the picture changes as you read each part.
           </p>
         )}
+        {simulation && (
+          <div className="lesson-tabs" role="tablist" aria-label="Lesson mode">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                role="tab"
+                aria-selected={tab === t.id}
+                className="lesson-tab"
+                onClick={() => setParams(t.id === 'sim' ? { tab: 'sim' } : {}, { replace: true })}
+              >
+                {tab === t.id && <motion.span layoutId="lesson-tab-pill" className="tab-pill" transition={spring} />}
+                <t.icon size={17} />
+                <span>{t.label}</span>
+                {t.note && <small>{t.note}</small>}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
+
+      {tab === 'sim' && simulation && (
+        <Block icon={<TerminalSquare size={20} />} tone="rose" title="Real-world tickets" intro={simulation.intro}>
+          <SimLab key={lesson.id} scenarios={simulation.scenarios} />
+        </Block>
+      )}
+
+      {tab === 'learn' && (
+        <>
 
       {/* key forces fresh state when switching lessons */}
       {story && <ScrollStory key={lesson.id} sections={story.sections} Scene={story.Scene} />}
@@ -136,6 +172,8 @@ export default function LessonPage() {
           </section>
         </div>
       </Block>
+        </>
+      )}
 
       <div className="lesson-nav">
         {prev ? (

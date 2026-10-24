@@ -15,6 +15,7 @@ import linuxFs from './foundations/LinuxFs'
 import processes from './foundations/Processes'
 import bash from './foundations/Bash'
 import git from './foundations/Git'
+import loadBalancing from './LoadBalancing'
 
 export type { Lesson }
 
@@ -264,6 +265,7 @@ export const lessons: Lesson[] = [
   docker,
   cicd,
   k8s,
+  loadBalancing,
 ]
 
 export const tracks = [...new Set(lessons.map((l) => l.track))]

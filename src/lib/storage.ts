@@ -17,31 +17,42 @@ function write(key: string, value: string) {
   }
 }
 
-const PROGRESS_KEY = 'dvl.progress'
-const listeners = new Set<() => void>()
-let completed: string[] = (() => {
-  try {
-    const parsed = JSON.parse(read(PROGRESS_KEY) ?? '[]')
-    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []
-  } catch {
-    return []
+/** A list of ids saved in localStorage that React components can subscribe to. */
+function listStore(key: string) {
+  const listeners = new Set<() => void>()
+  let items: string[] = (() => {
+    try {
+      const parsed = JSON.parse(read(key) ?? '[]')
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  })()
+  const subscribe = (fn: () => void) => {
+    listeners.add(fn)
+    return () => listeners.delete(fn)
   }
-})()
-
-function subscribe(fn: () => void) {
-  listeners.add(fn)
-  return () => listeners.delete(fn)
+  const set = (next: string[]) => {
+    items = next
+    write(key, JSON.stringify(items))
+    listeners.forEach((fn) => fn())
+  }
+  return {
+    use: () => useSyncExternalStore(subscribe, () => items),
+    toggle: (id: string) => set(items.includes(id) ? items.filter((x) => x !== id) : [...items, id]),
+    add: (id: string) => !items.includes(id) && set([...items, id]),
+  }
 }
 
-export function useCompleted(): string[] {
-  return useSyncExternalStore(subscribe, () => completed)
-}
+const progress = listStore('dvl.progress')
+const solvedSims = listStore('dvl.sims')
 
-export function toggleCompleted(id: string) {
-  completed = completed.includes(id) ? completed.filter((x) => x !== id) : [...completed, id]
-  write(PROGRESS_KEY, JSON.stringify(completed))
-  listeners.forEach((fn) => fn())
-}
+export const useCompleted = progress.use
+export const toggleCompleted = progress.toggle
+
+/** Ids of simulation scenarios the learner has finished. */
+export const useSolved = solvedSims.use
+export const markSolved = solvedSims.add
 
 export type Theme = 'dark' | 'light'
 
