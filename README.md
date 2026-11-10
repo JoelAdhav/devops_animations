@@ -34,7 +34,7 @@ Visual style: friendly flat illustrations with ink outlines, warm palette, sprin
 
 ## Run locally
 
-Requires Node.js 20 or newer.
+Requires Node.js 22.15 or newer (Node.js 24 recommended).
 
 ```bash
 npm install
@@ -46,6 +46,7 @@ Open http://localhost:5173. Keyboard: `Space` play/pause, `←` / `→` step.
 ```bash
 npm run build    # type-check and build to dist/
 npm run lint     # oxlint
+npm test         # simulator, persistence, and lesson loading regression tests
 ```
 
 ## Tech stack
@@ -70,7 +71,13 @@ src/
 
 1. Copy a file in `src/lessons/foundations/`. It default-exports a `Lesson` object: `story.sections` (title + JSX text) and `story.Scene` (receives the current `step`), plus optional `Playground`, `terms`, `quiz`, `interview`, `commands`.
 2. Build each scene step from `components/Illustrations` and wrap animated loops in a small component that calls `useLoop`.
-3. Add it to the `lessons` array in `src/lessons/registry.ts` with its track.
+3. Add its navigation metadata and dynamic `load` import to `src/lessons/registry.ts` with its track. Keep the title, summary, icon, tone and duration in sync with the lesson; `npm test` verifies these fields.
+
+## Learning progress
+
+Progress is saved in this browser: completed lessons and tickets, checked quiz answers, the active ticket and its filesystem, terminal transcript/history/input, and the last lesson and mode. The home page resumes the last unfinished lesson. Stories offer a Resume part button for your saved reading position. Quiz Retry and ticket Reset restart that activity without removing earned completion marks. Storage is optional; blocked or invalid browser storage falls back safely.
+
+Lesson implementations load on demand, with a retry action if a download fails. Regression tests also load every lesson and render its scenes and playground.
 
 ## Roadmap
 

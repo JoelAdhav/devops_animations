@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { ArrowRight, Check, Clock, Keyboard, MousePointerClick, Sparkles } from 'lucide-react'
 import { lessons, tracks } from '../lessons/registry'
-import { useCompleted } from '../lib/storage'
+import { loadLastLesson, useCompleted } from '../lib/storage'
 import { At, Bubble, Cloud, Envelope, Laptop, Mover, Router, Scene, Server } from '../components/Illustrations'
 
 /** Looping hero animation: a packet travels laptop → router → internet → server and back. */
@@ -52,7 +52,9 @@ function HeroScene() {
 
 export default function Home() {
   const completed = useCompleted()
-  const next = lessons.find((l) => !completed.includes(l.id)) ?? lessons[0]
+  const last = loadLastLesson()
+  const resume = lessons.find(l => l.id === last?.id && !completed.includes(l.id))
+  const next = resume ?? lessons.find((l) => !completed.includes(l.id)) ?? lessons[0]
 
   return (
     <div style={{ maxWidth: 1180 }}>
@@ -70,8 +72,8 @@ export default function Home() {
             with a simulator, take a quick quiz, and practise the interview questions.
           </p>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Link to={`/lesson/${next.id}`} className="btn primary" style={{ height: 48, padding: '0 22px', fontSize: 16 }}>
-              {completed.length ? 'Continue learning' : 'Start lesson 1'} <ArrowRight size={18} />
+            <Link to={`/lesson/${next.id}${resume && last?.tab === 'sim' ? '?tab=sim' : ''}`} className="btn primary" style={{ height: 48, padding: '0 22px', fontSize: 16 }}>
+              {resume || completed.length ? 'Continue learning' : 'Start lesson 1'} <ArrowRight size={18} />
             </Link>
             <span className="muted" style={{ fontSize: 14 }}>
               {lessons.length} lessons · free · no signup

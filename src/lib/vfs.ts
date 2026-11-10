@@ -4,8 +4,12 @@
  * sudo, simple permissions, and the everyday file, text and disk commands.
  */
 
-/** `size` (bytes) overrides the content length, so a short sample can stand in for a huge log. */
-export type Node = { type: 'dir' | 'file'; content?: string; size?: number }
+/**
+ * `size` (bytes) overrides the content length, so a short sample can stand in for a huge log.
+ * `mode`, `owner` and `group` are optional: without them a node gets the usual defaults for
+ * where it lives (see modeOf and ownerOf).
+ */
+export type Node = { type: 'dir' | 'file'; content?: string; size?: number; mode?: number; owner?: string; group?: string }
 export type Fs = Record<string, Node>
 
 export const HOME = '/home/joel'
@@ -132,24 +136,117 @@ function parseHuman(s: string) {
 
 /* ------------------------------------------------------------------ permissions */
 
-type Ctx = { fs: Fs; cwd: string; root: boolean; history: string[]; host: string; commands: Record<string, CustomCommand> }
+/** `user` is who runs the command; `root` is true under sudo (then user is "root"). */
+type Ctx = { fs: Fs; cwd: string; root: boolean; user: string; history: string[]; host: string; commands: Record<string, CustomCommand>; depth: number }
 
 /** A command a simulation adds to the shell, e.g. a fake curl or aws CLI for one scenario. */
 export type CustomCommand = (
   args: string[],
-  env: { fs: Fs; cwd: string; root: boolean; stdin: string[] | null },
+  env: { fs: Fs; cwd: string; root: boolean; user: string; stdin: string[] | null },
 ) => { out?: string[]; err?: string[]; code?: number; fs?: Fs }
 
+/** Accounts on every sandbox server. The first group is the user's primary group. */
+export const USERS: Record<string, { uid: number; groups: string[] }> = {
+  root: { uid: 0, groups: ['root'] },
+  joel: { uid: 1000, groups: ['joel', 'sudo', 'adm'] },
+  priya: { uid: 1001, groups: ['priya', 'devs'] },
+  'www-data': { uid: 33, groups: ['www-data'] },
+  shop: { uid: 998, groups: ['shop'] },
+}
+const GIDS: Record<string, number> = { root: 0, adm: 4, sudo: 27, 'www-data': 33, shop: 998, joel: 1000, priya: 1001, devs: 1002 }
+
+/** Owner and group of a node: explicit ones win, otherwise /home/NAME belongs to NAME and the rest to root. */
+export function ownerOf(path: string, n: Node): [string, string] {
+  const home = path.match(/^\/home\/([^/]+)/)?.[1]
+  const fallback = home && USERS[home] ? home : 'root'
+  return [n.owner ?? fallback, n.group ?? (n.owner ? USERS[n.owner]?.groups[0] ?? n.owner : fallback)]
+}
+
+/** Permission bits of a node, with the defaults a fresh Ubuntu server would have. */
+export function modeOf(path: string, n: Node): number {
+  if (n.mode !== undefined) return n.mode
+  if (n.type === 'dir') return path === '/root' ? 0o700 : path === '/tmp' ? 0o1777 : 0o755
+  return path.endsWith('.sh') ? 0o755 : path === '/etc/shadow' ? 0o640 : 0o644
+}
+
+/** Does `user` have the r (4), w (2) or x (1) bit on `path`? Root always does. */
+export function can(fs: Fs, user: string, path: string, bit: 4 | 2 | 1): boolean {
+  if (user === 'root') return true
+  const n = fs[path]
+  if (!n) return false
+  const [o, g] = ownerOf(path, n)
+  const shift = o === user ? 6 : USERS[user]?.groups.includes(g) ? 3 : 0
+  return ((modeOf(path, n) >> shift) & bit) !== 0
+}
+
+const who = (ctx: Ctx) => (ctx.root ? 'root' : ctx.user)
+
+/** Every folder above `path` must have the x bit, or you cannot get to it at all. */
+function reachable(ctx: Ctx, path: string) {
+  if (path === '/') return true
+  for (let p = parent(path); ; p = parent(p)) {
+    if (ctx.fs[p] && !can(ctx.fs, who(ctx), p, 1)) return false
+    if (p === '/') return true
+  }
+}
+
 function canRead(ctx: Ctx, path: string) {
-  return ctx.root || !(under(path, '/root') || path === '/etc/shadow')
+  return reachable(ctx, path) && (!ctx.fs[path] || can(ctx.fs, who(ctx), path, 4))
 }
 
-/** A normal user may only change things inside their home folder and /tmp. */
+/** Editing a file needs w on the file. Creating something needs w and x on the nearest existing folder above it. */
 function canWrite(ctx: Ctx, path: string) {
-  return ctx.root || under(path, HOME) || under(path, '/tmp')
+  if (ctx.fs[path]?.type === 'file') return reachable(ctx, path) && can(ctx.fs, who(ctx), path, 2)
+  let dir = parent(path)
+  while (!ctx.fs[dir] && dir !== '/') dir = parent(dir)
+  return reachable(ctx, dir) && can(ctx.fs, who(ctx), dir, 2) && can(ctx.fs, who(ctx), dir, 1)
 }
 
-const NEEDS_SUDO = '(hint: this path belongs to root, so the command needs sudo in front)'
+/** Deleting or renaming needs w on the folder that holds the entry, not on the entry itself. */
+function canRemove(ctx: Ctx, path: string) {
+  const dir = parent(path)
+  return reachable(ctx, path) && can(ctx.fs, who(ctx), dir, 2) && can(ctx.fs, who(ctx), dir, 1)
+}
+
+/** A new node owned by whoever creates it. */
+function made(ctx: Ctx, node: Node): Node {
+  const u = who(ctx)
+  return { ...node, owner: u, group: USERS[u]?.groups[0] ?? u }
+}
+
+const NEEDS_SUDO = '(hint: you lack permission here. ls -l shows who owns it; for root-owned paths put sudo in front)'
+
+const PERM_CHARS = 'rwxrwxrwx'
+
+/** 0o755 -> "rwxr-xr-x"; the sticky bit shows as t, like on /tmp. */
+export function permString(mode: number, isDir: boolean) {
+  let s = PERM_CHARS.split('').map((c, i) => (mode & (1 << (8 - i)) ? c : '-')).join('')
+  if (mode & 0o1000) s = s.slice(0, 8) + (mode & 1 ? 't' : 'T')
+  return (isDir ? 'd' : '-') + s
+}
+
+/**
+ * Applies a chmod spec to a mode: octal ("640") or symbolic ("u+x", "go-w", "a=r", "u=rwX,go=rX").
+ * Returns null for a spec chmod would reject.
+ */
+export function applyMode(cur: number, spec: string, isDir: boolean): number | null {
+  if (/^[0-7]{1,4}$/.test(spec)) return parseInt(spec, 8)
+  let mode = cur
+  for (const part of spec.split(',')) {
+    const m = part.match(/^([ugoa]*)([-+=])([rwxX]*)$/)
+    if (!m) return null
+    const whoSet = !m[1] || m[1].includes('a') ? 'ugo' : m[1]
+    let bits = 0
+    for (const c of m[3]) bits |= c === 'r' ? 4 : c === 'w' ? 2 : c === 'x' || (c === 'X' && (isDir || cur & 0o111)) ? 1 : 0
+    for (const w of whoSet) {
+      const shift = w === 'u' ? 6 : w === 'g' ? 3 : 0
+      if (m[2] === '=') mode &= ~(7 << shift)
+      if (m[2] === '-') mode &= ~(bits << shift)
+      else mode |= bits << shift
+    }
+  }
+  return mode
+}
 
 /* ------------------------------------------------------------------ lexer and parser */
 
@@ -307,22 +404,24 @@ function lines(text: string) {
 
 const DATE = 'Oct 24 03:12'
 
-function owner(path: string) {
-  return under(path, HOME) ? 'joel joel' : 'root root'
-}
-
-function longLine(fs: Fs, path: string, name: string, h: boolean) {
+/** One `ls -l` row. `w` holds the owner and group column widths, so rows line up like real ls. */
+function longLine(fs: Fs, path: string, name: string, h: boolean, w = { o: 5, g: 5 }) {
   const n = fs[path]
   const isDir = n.type === 'dir'
-  const perm = isDir ? 'drwxr-xr-x' : name.endsWith('.sh') ? '-rwxr-xr-x' : path === '/etc/shadow' ? '-rw-r-----' : '-rw-r--r--'
+  const [o, g] = ownerOf(path, n)
   const bytes = isDir ? 4096 : fileSize(n)
-  return `${perm} 1 ${owner(path)} ${(h ? human(bytes) : String(bytes)).padStart(h ? 5 : 8)} ${DATE} ${name}`
+  return `${permString(modeOf(path, n), isDir)} 1 ${o.padEnd(w.o)} ${g.padEnd(w.g)} ${(h ? human(bytes) : String(bytes)).padStart(h ? 5 : 8)} ${DATE} ${name}`
+}
+
+function widths(fs: Fs, paths: string[]) {
+  const og = paths.map((p) => ownerOf(p, fs[p]))
+  return { o: Math.max(4, ...og.map((x) => x[0].length)), g: Math.max(4, ...og.map((x) => x[1].length)) }
 }
 
 const MANUAL: Record<string, string> = {
   pwd: 'print the current working directory',
   cd: 'change directory: cd DIR, cd .., cd ~, cd -',
-  ls: 'list files: -l long, -a hidden, -h human sizes, -S sort by size, -1 one per line',
+  ls: 'list files: -l long, -a hidden, -h human sizes, -S sort by size, -d the folder itself, -1 one per line',
   cat: 'print files: cat FILE...',
   head: 'first lines of a file: head -n 20 FILE',
   tail: 'last lines of a file: tail -n 50 FILE, tail -f FILE to follow',
@@ -339,15 +438,20 @@ const MANUAL: Record<string, string> = {
   mv: 'move or rename: mv SRC DST',
   rm: 'remove: rm FILE, rm -r DIR. There is no recycle bin.',
   echo: 'print text: echo hi, echo hi > file, echo hi >> file',
-  sudo: 'run one command as root: sudo COMMAND',
+  sudo: 'run one command as root: sudo COMMAND, or as another user: sudo -u NAME COMMAND',
+  chmod: 'change permissions: chmod 640 FILE, chmod u+x FILE, chmod -R go-w DIR',
+  chown: 'change owner (root only): sudo chown USER:GROUP FILE, -R for folders',
+  chgrp: 'change group: sudo chgrp GROUP FILE',
+  stat: 'details of a file: stat FILE, stat -c "%a %U:%G %n" FILE',
+  id: 'your user id and groups: id, id USER',
+  groups: 'groups a user belongs to: groups USER',
+  bash: 'run a script: bash script.sh (or ./script.sh if it has the x bit)',
   tee: 'copy input to a file and the screen: echo hi | sudo tee FILE (-a appends)',
   tree: 'draw a directory tree',
   history: 'commands you typed',
 }
 
 const ELSEWHERE: Record<string, string> = {
-  chmod: 'Linux file permissions',
-  chown: 'Linux file permissions',
   ps: 'Processes and services',
   top: 'Processes and services',
   kill: 'Processes and services',
@@ -359,7 +463,7 @@ const ELSEWHERE: Record<string, string> = {
   dig: 'DNS',
 }
 
-export const COMMANDS = [...Object.keys(MANUAL), 'clear', 'whoami', 'hostname', 'date', 'help', 'man', 'less', 'more', 'which', 'nano', 'vim', 'truncate'].sort()
+export const COMMANDS = [...Object.keys(MANUAL), 'clear', 'whoami', 'hostname', 'date', 'help', 'man', 'less', 'more', 'which', 'nano', 'vim', 'truncate', 'sh', 'sleep'].sort()
 
 function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean): Exec {
   const [cmd, ...args] = argv
@@ -403,7 +507,21 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
     case 'pwd':
       return ok([cwd])
     case 'whoami':
-      return ok([ctx.root ? 'root' : 'joel'])
+      return ok([who(ctx)])
+    case 'id':
+    case 'groups': {
+      const name = args[0] ?? who(ctx)
+      const u = USERS[name]
+      if (!u) return fail(`${cmd}: '${name}': no such user`)
+      if (cmd === 'groups') return ok([args[0] ? `${name} : ${u.groups.join(' ')}` : u.groups.join(' ')])
+      const g = (n: string) => `${GIDS[n] ?? 0}(${n})`
+      return ok([`uid=${u.uid}(${name}) gid=${g(u.groups[0])} groups=${u.groups.map(g).join(',')}`])
+    }
+    case 'sleep':
+    case 'true':
+      return ok()
+    case 'false':
+      return fail([], { code: 1 })
     case 'hostname':
       return ok([ctx.host])
     case 'date':
@@ -431,9 +549,10 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
 
     case 'cd': {
       const target = args[0] === '-' ? parent(cwd) : resolve(cwd, args[0] ?? '~')
-      if (!canRead(ctx, target)) return fail(`bash: cd: ${args[0]}: Permission denied`)
       if (!fs[target]) return fail(`bash: cd: ${args[0]}: No such file or directory`)
       if (fs[target].type !== 'dir') return fail(`bash: cd: ${args[0]}: Not a directory`)
+      // Entering a folder needs its x bit (and x on every folder above it).
+      if (!reachable(ctx, target) || !can(fs, who(ctx), target, 1)) return fail(`bash: cd: ${args[0]}: Permission denied`)
       return ok([], { cwd: target })
     }
 
@@ -446,10 +565,12 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
       const targets = pos.length ? pos : ['.']
       const out: string[] = []
       const err: string[] = []
-      const fileArgs = targets.filter((t) => fs[resolve(cwd, t)]?.type === 'file')
-      const dirArgs = targets.filter((t) => fs[resolve(cwd, t)]?.type === 'dir')
+      // -d lists a folder itself instead of what is inside it.
+      const fileArgs = targets.filter((t) => fs[resolve(cwd, t)]?.type === 'file' || (flags.has('d') && fs[resolve(cwd, t)]))
+      const dirArgs = flags.has('d') ? [] : targets.filter((t) => fs[resolve(cwd, t)]?.type === 'dir')
       for (const t of targets.filter((t) => !fs[resolve(cwd, t)])) err.push(`ls: cannot access '${t}': No such file or directory`)
-      for (const f of fileArgs) out.push(long ? longLine(fs, resolve(cwd, f), f, h) : f)
+      const fileW = widths(fs, fileArgs.map((f) => resolve(cwd, f)))
+      for (const f of fileArgs) out.push(long ? longLine(fs, resolve(cwd, f), f, h, fileW) : f)
       dirArgs.forEach((d, i) => {
         const dir = resolve(cwd, d)
         if (!canRead(ctx, dir)) return err.push(`ls: cannot open directory '${d}': Permission denied`)
@@ -462,7 +583,8 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         if (long) {
           const blocks = entries.reduce((s, e) => s + Math.ceil((fs[e.path].type === 'dir' ? 4096 : fileSize(fs[e.path])) / 4096) * 4, 0)
           out.push(`total ${h ? human(blocks * KB) : blocks}`)
-          entries.forEach((e) => out.push(longLine(fs, e.path, e.name, h)))
+          const w = widths(fs, entries.map((e) => e.path))
+          entries.forEach((e) => out.push(longLine(fs, e.path, e.name, h, w)))
         } else if (one) entries.forEach((e) => out.push(e.name))
         else if (entries.length) out.push(entries.map((e) => e.name + (fs[e.path].type === 'dir' && !dots.includes(e) ? '/' : '')).join('  '))
       })
@@ -507,10 +629,10 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
           if (!flags.has('p')) return fail(`mkdir: cannot create directory '${a}': No such file or directory`, { info: ['(hint: add -p to create the missing parent folders too)'] })
           let p = path
           while (!next[p]) {
-            next[p] = { type: 'dir' }
+            next[p] = made(ctx, { type: 'dir' })
             p = parent(p)
           }
-        } else next[path] = { type: 'dir' }
+        } else next[path] = made(ctx, { type: 'dir' })
       }
       return ok([], { fs: next })
     }
@@ -523,7 +645,7 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         const path = resolve(cwd, a)
         if (!next[parent(path)]) return fail(`touch: cannot touch '${a}': No such file or directory`)
         if (!canWrite(ctx, path)) return fail(`touch: cannot touch '${a}': Permission denied`, { info: [NEEDS_SUDO] })
-        if (!next[path]) next[path] = { type: 'file', content: '' }
+        if (!next[path]) next[path] = made(ctx, { type: 'file', content: '' })
       }
       return ok([], { fs: next })
     }
@@ -537,7 +659,7 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         const path = resolve(cwd, a)
         if (!canWrite(ctx, path)) return fail(`truncate: cannot open '${a}' for writing: Permission denied`, { info: [NEEDS_SUDO] })
         if (next[path]?.type === 'dir') return fail(`truncate: cannot open '${a}' for writing: Is a directory`)
-        next[path] = { type: 'file', content: '' }
+        next[path] = next[path] ? { ...next[path], content: '', size: undefined } : made(ctx, { type: 'file', content: '' })
       }
       return ok([], { fs: next })
     }
@@ -719,6 +841,21 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         } else if (a === '-maxdepth') {
           maxDepth = parseInt(v ?? '', 10)
           i++
+        } else if (a === '-perm') {
+          // -perm 644: exactly; -perm -o+w: all these bits; -perm /022: any of these bits.
+          const m = v?.match(/^([-/]?)(.+)$/)
+          const want = m ? applyMode(0, m[2], false) : null
+          if (!m || want === null) return fail(`find: invalid mode '${v ?? ''}'`)
+          const bits = want & 0o7777
+          tests.push((p) => {
+            const mode = modeOf(p, fs[p]) & 0o7777
+            return m[1] === '-' ? (mode & bits) === bits : m[1] === '/' ? (mode & bits) !== 0 : mode === bits
+          })
+          i++
+        } else if (a === '-user' || a === '-group') {
+          if (v === undefined) return fail(`find: missing argument to \`${a}'`)
+          tests.push((p) => ownerOf(p, fs[p])[a === '-user' ? 0 : 1] === v)
+          i++
         } else return fail(`find: unknown predicate \`${a}'`)
       }
       const out: string[] = []
@@ -811,7 +948,7 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
           err.push(`rm: refusing to remove '${a}' (this sandbox protects it; on a real server this would destroy the machine)`)
           continue
         }
-        if (!canWrite(ctx, path)) {
+        if (!canRemove(ctx, path)) {
           err.push(`rm: cannot remove '${a}': Permission denied`)
           info = [NEEDS_SUDO]
           continue
@@ -854,7 +991,7 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
           err.push(`${cmd}: cannot create '${dstArg}': No such file or directory`)
           continue
         }
-        if (!canWrite(ctx, dst) || (cmd === 'mv' && !canWrite(ctx, src))) {
+        if (!canWrite(ctx, dst) || (cmd === 'mv' && !canRemove(ctx, src))) {
           err.push(`${cmd}: cannot ${cmd === 'mv' ? 'move' : 'create'} '${s}': Permission denied`)
           info = [NEEDS_SUDO]
           continue
@@ -870,7 +1007,13 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         const moved: Fs = {}
         Object.keys(fs)
           .filter((k) => under(k, src))
-          .forEach((k) => (moved[dst + k.slice(src.length)] = { ...fs[k] }))
+          // mv keeps owner and mode; cp makes new files owned by whoever copies them (like cp without -p).
+          .forEach((k) => (moved[dst + k.slice(src.length)] = cmd === 'mv' ? { ...fs[k] } : made(ctx, { ...fs[k], mode: modeOf(k, fs[k]) })))
+        const conflict = Object.keys(moved).find((k) => next[k] && next[k].type !== moved[k].type)
+        if (conflict) {
+          err.push(`${cmd}: cannot overwrite '${conflict}': source and destination have different types`)
+          continue
+        }
         if (cmd === 'mv') Object.keys(next).forEach((k) => under(k, src) && delete next[k])
         next = { ...next, ...moved }
       }
@@ -887,20 +1030,121 @@ function exec(ctx: Ctx, argv: string[], stdin: string[] | null, piped: boolean):
         if (next[p]?.type === 'dir') return fail(`tee: ${f}: Is a directory`, { out: text })
         if (!canWrite(ctx, p)) return fail(`tee: ${f}: Permission denied`, { out: text, info: [NEEDS_SUDO] })
         const old = flags.has('a') && next[p]?.content ? next[p].content + '\n' : ''
-        next = { ...next, [p]: { type: 'file', content: old + text.join('\n') } }
+        next = { ...next, [p]: next[p] ? { ...next[p], content: old + text.join('\n'), size: undefined } : made(ctx, { type: 'file', content: text.join('\n') }) }
       }
       return ok(text, { fs: next })
     }
 
-    case 'sudo': {
-      if (!args.length || args[0] === '-i' || args[0] === '-s') return fail('sudo: interactive root shells are disabled here. Use: sudo COMMAND')
-      return exec({ ...ctx, root: true }, args, stdin, piped)
+    case 'chmod': {
+      const recursive = args.includes('-R')
+      const [spec, ...files] = args.filter((a) => a !== '-R' && a !== '-v')
+      if (!spec || !files.length) return fail(`chmod: missing operand${spec ? ` after '${spec}'` : ''}`)
+      const next = { ...fs }
+      const err: string[] = []
+      let info: string[] | undefined
+      for (const f of files) {
+        const p = resolve(cwd, f)
+        if (!next[p] || !reachable(ctx, p)) {
+          err.push(`chmod: cannot access '${f}': ${next[p] ? 'Permission denied' : 'No such file or directory'}`)
+          continue
+        }
+        for (const t of recursive && next[p].type === 'dir' ? [p, ...descendants(next, p)] : [p]) {
+          const n = next[t]
+          if (!ctx.root && ownerOf(t, n)[0] !== ctx.user) {
+            err.push(`chmod: changing permissions of '${t === p ? f : t}': Operation not permitted`)
+            info = ['(hint: only the owner or root can chmod. Use sudo if it is not your file)']
+            continue
+          }
+          const mode = applyMode(modeOf(t, n), spec, n.type === 'dir')
+          if (mode === null) return fail(`chmod: invalid mode: '${spec}'`)
+          next[t] = { ...n, mode }
+        }
+      }
+      return { out: [], err, info, code: err.length ? 1 : 0, fs: next }
     }
 
+    case 'chown':
+    case 'chgrp': {
+      const recursive = args.includes('-R')
+      const [spec, ...files] = args.filter((a) => a !== '-R' && a !== '-v')
+      if (!spec || !files.length) return fail(`${cmd}: missing operand${spec ? ` after '${spec}'` : ''}`)
+      const [newOwner, newGroup] = cmd === 'chgrp' ? ['', spec] : spec.split(':')
+      if (newOwner && !USERS[newOwner]) return fail(`${cmd}: invalid user: '${spec}'`)
+      if (newGroup && GIDS[newGroup] === undefined) return fail(`${cmd}: invalid group: '${spec}'`)
+      const next = { ...fs }
+      const err: string[] = []
+      for (const f of files) {
+        const p = resolve(cwd, f)
+        if (!next[p] || !reachable(ctx, p)) {
+          err.push(`${cmd}: cannot access '${f}': ${next[p] ? 'Permission denied' : 'No such file or directory'}`)
+          continue
+        }
+        // Only root may give files away. A file's owner may switch its group to one they belong to.
+        const mine = ownerOf(p, next[p])[0] === ctx.user
+        const allowed = ctx.root || (!newOwner && mine && USERS[ctx.user]?.groups.includes(newGroup))
+        if (!allowed) {
+          err.push(`${cmd}: changing ${newOwner ? 'ownership' : 'group'} of '${f}': Operation not permitted`)
+          continue
+        }
+        for (const t of recursive && next[p].type === 'dir' ? [p, ...descendants(next, p)] : [p]) {
+          const [o, g] = ownerOf(t, next[t])
+          next[t] = { ...next[t], owner: newOwner || o, group: newGroup || (newOwner && spec.endsWith(':') ? USERS[newOwner].groups[0] : g) }
+        }
+      }
+      return { out: [], err, info: err.length ? ['(hint: changing owners needs root: sudo chown USER:GROUP FILE)'] : undefined, code: err.length ? 1 : 0, fs: next }
+    }
+
+    case 'stat': {
+      const fmt = args[0] === '-c' ? args[1] : args.find((a) => a.startsWith('--format='))?.slice(9)
+      const files = args[0] === '-c' ? args.slice(2) : args.filter((a) => !a.startsWith('-'))
+      if (!files.length) return fail('stat: missing operand')
+      const out: string[] = []
+      const err: string[] = []
+      for (const f of files) {
+        const p = resolve(cwd, f)
+        if (!fs[p] || !reachable(ctx, p)) {
+          err.push(`stat: cannot statx '${f}': ${fs[p] ? 'Permission denied' : 'No such file or directory'}`)
+          continue
+        }
+        const n = fs[p]
+        const [o, g] = ownerOf(p, n)
+        const mode = modeOf(p, n)
+        const octal = mode.toString(8).padStart(4, '0')
+        if (fmt) {
+          const fields: Record<string, string> = { a: mode.toString(8), A: permString(mode, n.type === 'dir'), U: o, G: g, n: f, s: String(n.type === 'dir' ? 4096 : fileSize(n)) }
+          out.push(fmt.replace(/%([aAUGns])/g, (_, k: string) => fields[k]))
+        } else {
+          out.push(
+            `  File: ${f}`,
+            `  Size: ${n.type === 'dir' ? 4096 : fileSize(n)}\tBlocks: 8\tIO Block: 4096   ${n.type === 'dir' ? 'directory' : 'regular file'}`,
+            `Access: (${octal}/${permString(mode, n.type === 'dir')})  Uid: (${String(USERS[o]?.uid ?? 0).padStart(5)}/${o.padStart(8)})   Gid: (${String(GIDS[g] ?? 0).padStart(5)}/${g.padStart(8)})`,
+          )
+        }
+      }
+      return { out, err, code: err.length ? 1 : 0 }
+    }
+
+    case 'sudo': {
+      if (!args.length || args[0] === '-i' || args[0] === '-s') return fail('sudo: interactive root shells are disabled here. Use: sudo COMMAND')
+      if (args[0] === '-u') {
+        const name = args[1]
+        if (!name || !USERS[name]) return fail(`sudo: unknown user ${name ?? ''}`)
+        if (!args[2]) return fail('usage: sudo -u USER COMMAND')
+        return exec({ ...ctx, root: name === 'root', user: name }, args.slice(2), stdin, piped)
+      }
+      return exec({ ...ctx, root: true, user: 'root' }, args, stdin, piped)
+    }
+
+    case 'bash':
+    case 'sh':
+      if (!args[0]) return fail(`${cmd}: an interactive shell is not available here. Run a script: ${cmd} FILE`)
+      return runScript(ctx, args[0], false)
+
     default: {
+      if (cmd.includes('/')) return runScript(ctx, cmd, true)
       const custom = ctx.commands[cmd]
       if (custom) {
-        const r = custom(args, { fs, cwd, root: ctx.root, stdin })
+        const r = custom(args, { fs, cwd, root: ctx.root, user: who(ctx), stdin })
         return { out: r.out ?? [], err: r.err ?? [], code: r.code ?? (r.err?.length ? 1 : 0), fs: r.fs }
       }
       if (ELSEWHERE[cmd]) return fail(`${cmd}: not part of this sandbox. It is covered in the "${ELSEWHERE[cmd]}" lesson.`)
@@ -915,20 +1159,61 @@ export type OutLine = { text: string; kind?: 'err' | 'info' }
 export type Result = { fs: Fs; cwd: string; out: OutLine[]; code: number; clear?: boolean }
 export type RunOptions = { history?: string[]; host?: string; commands?: Record<string, CustomCommand> }
 
+/**
+ * Runs a script file line by line, like bash does. `direct` means it was started as ./FILE,
+ * which needs the x bit; "bash FILE" only needs r.
+ */
+function runScript(ctx: Ctx, name: string, direct: boolean): Exec {
+  const p = resolve(ctx.cwd, name)
+  const n = ctx.fs[p]
+  const u = who(ctx)
+  if (!n) return fail(`bash: ${name}: No such file or directory`, { code: 127 })
+  if (n.type === 'dir') return fail(`bash: ${name}: Is a directory`, { code: 126 })
+  if (!reachable(ctx, p) || (direct && !can(ctx.fs, u, p, 1)) || !can(ctx.fs, u, p, 4)) {
+    const noX = direct && reachable(ctx, p) && !can(ctx.fs, u, p, 1)
+    return fail(`bash: ${name}: Permission denied`, { code: 126, info: noX ? ['(hint: a script needs the x (execute) bit to run as ./FILE. ls -l shows it; chmod u+x FILE adds it)'] : undefined })
+  }
+  if (ctx.depth > 3) return fail(`bash: ${name}: scripts calling scripts this deep are not simulated`)
+  // A script runs in its own copy of the shell: cd inside it does not move you.
+  const child: Ctx = { ...ctx, depth: ctx.depth + 1 }
+  const out: string[] = []
+  const err: string[] = []
+  let code = 0
+  for (const line of lines(textOf(n))) {
+    const t = line.trim()
+    if (!t || t.startsWith('#') || /^set\s/.test(t)) continue
+    const exit = t.match(/^exit(?:\s+(\d+))?$/)
+    if (exit) {
+      code = parseInt(exit[1] ?? String(code), 10)
+      break
+    }
+    const r = runLine(child, t)
+    for (const o of r.out) (o.kind === 'err' ? err : out).push(o.text)
+    code = r.code
+  }
+  return { out, err, code, fs: child.fs }
+}
+
 /** Runs one command line. Pure: returns the new filesystem, directory and output. */
 export function run(fs: Fs, cwd: string, line: string, opts: RunOptions = {}): Result {
-  const toks = lex(line)
-  if (typeof toks === 'string') return { fs, cwd, out: [{ text: `bash: ${toks}`, kind: 'err' }], code: 2 }
-  const chains = parse(toks)
-  if (typeof chains === 'string') return { fs, cwd, out: [{ text: `bash: ${chains}`, kind: 'err' }], code: 2 }
+  const ctx: Ctx = { fs, cwd, root: false, user: 'joel', history: opts.history ?? [], host: opts.host ?? 'server', commands: opts.commands ?? {}, depth: 0 }
+  const r = runLine(ctx, line)
+  return { fs: ctx.fs, cwd: ctx.cwd, ...r }
+}
 
-  const ctx: Ctx = { fs, cwd, root: false, history: opts.history ?? [], host: opts.host ?? 'server', commands: opts.commands ?? {} }
+/** Runs a line against `ctx`, updating its fs and cwd as it goes. */
+function runLine(ctx: Ctx, line: string): { out: OutLine[]; code: number; clear?: boolean } {
+  const toks = lex(line)
+  if (typeof toks === 'string') return { out: [{ text: `bash: ${toks}`, kind: 'err' }], code: 2 }
+  const chains = parse(toks)
+  if (typeof chains === 'string') return { out: [{ text: `bash: ${chains}`, kind: 'err' }], code: 2 }
+
   const out: OutLine[] = []
   let code = 0
   let clear = false
 
   for (let c = 0; c < chains.length; c++) {
-    if (c > 0 && chains[c - 1].op === '&&' && code !== 0) break
+    if (c > 0 && chains[c - 1].op === '&&' && code !== 0) continue
     let stdin: string[] | null = null
     const stages = chains[c].stages
     for (let s = 0; s < stages.length; s++) {
@@ -946,7 +1231,7 @@ export function run(fs: Fs, cwd: string, line: string, opts: RunOptions = {}): R
 
       if (st.errFile && st.errFile !== '/dev/null' && r.err.length) {
         const p = resolve(ctx.cwd, st.errFile)
-        if (canWrite(ctx, p) && ctx.fs[parent(p)]) ctx.fs = { ...ctx.fs, [p]: { type: 'file', content: r.err.join('\n') } }
+        if (canWrite(ctx, p) && ctx.fs[parent(p)]) ctx.fs = { ...ctx.fs, [p]: ctx.fs[p] ? { ...ctx.fs[p], content: r.err.join('\n') } : made(ctx, { type: 'file', content: r.err.join('\n') }) }
       } else if (!st.errFile) out.push(...r.err.map((t) => ({ text: t, kind: 'err' as const })))
       if (r.info) out.push(...r.info.map((t) => ({ text: t, kind: 'info' as const })))
 
@@ -966,14 +1251,14 @@ export function run(fs: Fs, cwd: string, line: string, opts: RunOptions = {}): R
         } else {
           const old = st.out.append && ctx.fs[p]?.content ? ctx.fs[p].content + '\n' : ''
           const body = r.out.join('\n')
-          ctx.fs = { ...ctx.fs, [p]: { type: 'file', content: old + body } }
+          ctx.fs = { ...ctx.fs, [p]: ctx.fs[p] ? { ...ctx.fs[p], content: old + body, size: undefined } : made(ctx, { type: 'file', content: body }) }
         }
         stdin = []
       } else if (s < stages.length - 1) stdin = r.out
       else out.push(...r.out.map((t) => ({ text: t })))
     }
   }
-  return { fs: ctx.fs, cwd: ctx.cwd, out, code, clear }
+  return { out, code, clear }
 }
 
 /** Tab completion for the last word: a command name first, a path after that. */

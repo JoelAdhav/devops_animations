@@ -63,3 +63,34 @@ export function loadTheme(): Theme {
 export function saveTheme(theme: Theme) {
   write('dvl.theme', theme)
 }
+
+/** Versioned drafts are separate from completion so restarting a ticket preserves earned progress. */
+export function readProgress<T>(key: string, valid: (value: unknown) => value is T): T | null {
+  try {
+    const value: unknown = JSON.parse(read(`dvl.draft.v1.${key}`) ?? 'null')
+    return valid(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+export function writeProgress(key: string, value: unknown) {
+  try { write(`dvl.draft.v1.${key}`, JSON.stringify(value)) } catch { /* storage is optional */ }
+}
+
+export function clearProgress(key: string) {
+  try { localStorage.removeItem(`dvl.draft.v1.${key}`) } catch { /* storage is optional */ }
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function loadLastLesson(): { id: string; tab: 'learn' | 'sim' } | null {
+  return readProgress('last-lesson', (v): v is { id: string; tab: 'learn' | 'sim' } =>
+    isRecord(v) && typeof v.id === 'string' && (v.tab === 'learn' || v.tab === 'sim'))
+}
+
+export function saveLastLesson(id: string, tab: 'learn' | 'sim') {
+  writeProgress('last-lesson', { id, tab })
+}

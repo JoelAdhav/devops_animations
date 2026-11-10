@@ -7,6 +7,7 @@ import { At, Box, Cloud, Laptop, Link, Router, Scene, Tag, Txt } from '../../com
 import { bouncy } from '../../lib/motion'
 import type { Tone } from '../../components/Diagram'
 import { useLoop } from '../../lib/useLoop'
+import { hostRange } from '../../lib/cidr'
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -429,10 +430,7 @@ function CidrCalculator() {
   const net = valid ? (n & mask) >>> 0 : 0
   const bcast = valid ? (net | (~mask >>> 0)) >>> 0 : 0
   const total = 2 ** (32 - prefix)
-  const reserved = aws ? 5 : 2
-  const usable = prefix >= 31 ? (prefix === 32 ? 1 : 2) : Math.max(0, total - reserved)
-  const firstUsable = prefix >= 31 ? net : net + (aws ? 4 : 1)
-  const lastUsable = prefix >= 31 ? bcast : bcast - 1
+  const hosts = hostRange(net, bcast, prefix, aws)
   const probeN = ipToInt(probe)
   const inside = probeN !== null && valid ? ((probeN & mask) >>> 0) === net : null
   const bits = valid ? n.toString(2).padStart(32, '0') : ''.padStart(32, '0')
@@ -441,9 +439,9 @@ function CidrCalculator() {
     ['Network address', `${intToIp(net)}/${prefix}`],
     ['Subnet mask', intToIp(mask)],
     ['Total addresses', fmt(total)],
-    [`Usable (${aws ? 'AWS, minus 5' : 'normal, minus 2'})`, fmt(usable)],
-    ['First usable', intToIp(firstUsable)],
-    ['Last usable', intToIp(lastUsable)],
+    [`Usable (${aws ? 'AWS, minus 5' : prefix === 31 ? 'point-to-point' : prefix === 32 ? 'host route' : 'normal, minus 2'})`, hosts.valid ? fmt(hosts.usable) : '–'],
+    ['First usable', hosts.first === null ? '–' : intToIp(hosts.first)],
+    ['Last usable', hosts.last === null ? '–' : intToIp(hosts.last)],
     ['Broadcast', intToIp(bcast)],
   ]
 
@@ -461,7 +459,8 @@ function CidrCalculator() {
           <label className="label" htmlFor="cidr-prefix">
             Prefix: /{prefix}
           </label>
-          <input id="cidr-prefix" type="range" min={8} max={32} step={1} value={prefix} onChange={(e) => setPrefix(Number(e.target.value))} style={{ marginTop: 10 }} />
+          <input id="cidr-prefix" type="range" min={8} max={32} step={1} value={prefix} aria-invalid={!hosts.valid} aria-describedby={!hosts.valid ? 'cidr-prefix-error' : undefined} onChange={(e) => setPrefix(Number(e.target.value))} style={{ marginTop: 10 }} />
+          {!hosts.valid && <span id="cidr-prefix-error" className="field-error" role="status">AWS IPv4 subnets require a prefix from /16 to /28. Choose a supported prefix or turn off AWS subnet rules.</span>}
         </div>
         <label className="switch" style={{ marginTop: 22 }}>
           <input type="checkbox" checked={aws} onChange={(e) => setAws(e.target.checked)} />

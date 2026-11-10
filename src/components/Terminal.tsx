@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { complete, pretty, run, type CustomCommand, type Fs, type OutLine, type Result } from '../lib/vfs'
 
+import { readProgress, writeProgress, isRecord } from '../lib/storage'
+
 /** `at` is the directory the command was typed in; set only on command lines. */
 type Line = OutLine & { at?: string }
+type SavedTerminal = { lines: Line[]; history: string[]; input: string }
+function isTerminal(v: unknown): v is SavedTerminal {
+  return isRecord(v) && typeof v.input === 'string' && Array.isArray(v.history) && v.history.every((line) => typeof line === 'string') &&
+    Array.isArray(v.lines) && v.lines.every((line) => isRecord(line) && typeof line.text === 'string' &&
+      (line.at === undefined || typeof line.at === 'string') && (line.kind === undefined || line.kind === 'err' || line.kind === 'info'))
+}
 
 function Prompt({ host, cwd }: { host: string; cwd: string }) {
   return (
@@ -27,7 +35,9 @@ export function Terminal({
   height = 300,
   autoFocus = false,
   commands,
+  persistenceKey,
 }: {
+  persistenceKey?: string
   fs: Fs
   cwd: string
   onRun: (r: Result, line: string, prevCwd: string) => void
@@ -39,9 +49,13 @@ export function Terminal({
   /** Extra commands this terminal understands (e.g. a scenario's fake curl). */
   commands?: Record<string, CustomCommand>
 }) {
-  const [lines, setLines] = useState<Line[]>(() => (banner ?? ['Type "help" to see the commands. Tab completes names, ↑ recalls history.']).map((text) => ({ text, kind: 'info' })))
-  const [input, setInput] = useState('')
-  const [history, setHistory] = useState<string[]>([])
+  const [saved] = useState(() => persistenceKey ? readProgress(persistenceKey, isTerminal) : null)
+  const [lines, setLines] = useState<Line[]>(() => saved?.lines ?? (banner ?? ['Type "help" to see the commands. Tab completes names, ↑ recalls history.']).map((text) => ({ text, kind: 'info' })))
+  const [input, setInput] = useState(saved?.input ?? '')
+  const [history, setHistory] = useState<string[]>(saved?.history ?? [])
+  useEffect(() => {
+    if (persistenceKey) writeProgress(persistenceKey, { lines, history, input })
+  }, [persistenceKey, lines, history, input])
   const [hIdx, setHIdx] = useState(-1)
   const bodyRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)

@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { ArrowRight, CheckCircle2, Circle, Eye, Lightbulb, PartyPopper, RotateCcw, Siren } from 'lucide-react'
 import { Terminal } from './Terminal'
 import { HOME, type CustomCommand, type Fs, type Result } from '../lib/vfs'
-import { markSolved, useSolved } from '../lib/storage'
+import { markSolved, useSolved, readProgress, writeProgress, clearProgress, isRecord } from '../lib/storage'
 import type { SimState } from '../lib/sim'
 import { bouncy, spring } from '../lib/motion'
 
@@ -34,8 +34,26 @@ function fresh(sc: Scenario): SimState {
   return { fs, cwd: cwd ?? HOME, log: [] }
 }
 
+function isSimState(v: unknown): v is SimState {
+  if (!isRecord(v) || !isRecord(v.fs) || typeof v.cwd !== 'string' || !Array.isArray(v.log)) return false
+  const fs = v.fs
+  const cwdNode = fs[v.cwd]
+  return isRecord(cwdNode) && cwdNode.type === 'dir' &&
+    Object.entries(fs).every(([path, node]) => path.startsWith('/') && isRecord(node) &&
+      (node.type === 'dir' || node.type === 'file') && (node.content === undefined || typeof node.content === 'string') &&
+      (node.size === undefined || (typeof node.size === 'number' && Number.isFinite(node.size) && node.size >= 0))) &&
+    v.log.every((entry) => isRecord(entry) && typeof entry.line === 'string' && typeof entry.cwd === 'string' && typeof entry.out === 'string')
+}
+
 function Run({ scenario, onNext }: { scenario: Scenario; onNext?: () => void }) {
-  const [state, setState] = useState(() => fresh(scenario))
+  const storageKey = `scenario.${scenario.id}`
+  const terminalKey = `terminal.${scenario.id}`
+  const [state, setState] = useState(() => {
+    const saved = readProgress(storageKey, isSimState)
+    if (!saved) clearProgress(terminalKey)
+    return saved ?? fresh(scenario)
+  })
+  useEffect(() => { writeProgress(storageKey, state) }, [storageKey, state])
   const [round, setRound] = useState(0)
   const [hints, setHints] = useState(0)
   const [showSolution, setShowSolution] = useState(false)
@@ -52,6 +70,7 @@ function Run({ scenario, onNext }: { scenario: Scenario; onNext?: () => void }) 
   }
 
   function reset() {
+    clearProgress(terminalKey)
     setState(fresh(scenario))
     setRound((n) => n + 1)
     setHints(0)
@@ -133,7 +152,7 @@ function Run({ scenario, onNext }: { scenario: Scenario; onNext?: () => void }) 
       </div>
 
       <div className="sim-main">
-        <Terminal key={`${scenario.id}-${round}`} fs={state.fs} cwd={state.cwd} host={scenario.host} onRun={onRun} commands={scenario.commands} height={440} autoFocus={round > 0} />
+        <Terminal key={`${scenario.id}-${round}`} persistenceKey={terminalKey} fs={state.fs} cwd={state.cwd} host={scenario.host} onRun={onRun} commands={scenario.commands} height={440} autoFocus={round > 0} />
         <AnimatePresence>
           {solved && (
             <motion.section className="sim-solved" initial={{ opacity: 0, scale: 0.9, y: 16 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0 }} transition={bouncy}>
@@ -155,8 +174,13 @@ function Run({ scenario, onNext }: { scenario: Scenario; onNext?: () => void }) 
 }
 
 /** Scenario picker plus the live ticket, goals and terminal for the chosen one. */
-export function SimLab({ scenarios }: { scenarios: Scenario[] }) {
-  const [active, setActive] = useState(0)
+export function SimLab({ scenarios, lessonId }: { scenarios: Scenario[]; lessonId: string }) {
+  const storageKey = `scenario-picker.${lessonId}`
+  const [active, setActive] = useState(() => {
+    const saved = readProgress(storageKey, (v): v is string => typeof v === 'string')
+    return Math.max(0, scenarios.findIndex((s) => s.id === saved))
+  })
+  useEffect(() => { writeProgress(storageKey, scenarios[active].id) }, [storageKey, scenarios, active])
   const solved = useSolved()
   const sc = scenarios[active]
 

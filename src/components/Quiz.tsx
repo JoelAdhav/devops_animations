@@ -2,11 +2,13 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Check, PartyPopper, RotateCcw, X } from 'lucide-react'
 
+import { readProgress, writeProgress, isRecord } from '../lib/storage'
+
 export type QuizQuestion = { q: string; options: string[]; answer: number; why: string }
 
-function Question({ item, index, onResult }: { item: QuizQuestion; index: number; onResult: (ok: boolean) => void }) {
-  const [picked, setPicked] = useState<number | null>(null)
-  const [checked, setChecked] = useState(false)
+function Question({ item, index, saved, onResult }: { item: QuizQuestion; index: number; saved?: number; onResult: (picked: number) => void }) {
+  const [picked, setPicked] = useState<number | null>(saved ?? null)
+  const [checked, setChecked] = useState(saved !== undefined)
   const [error, setError] = useState('')
 
   function check() {
@@ -15,7 +17,7 @@ function Question({ item, index, onResult }: { item: QuizQuestion; index: number
       return
     }
     setChecked(true)
-    onResult(picked === item.answer)
+    onResult(picked)
   }
 
   const ok = checked && picked === item.answer
@@ -72,17 +74,27 @@ function Question({ item, index, onResult }: { item: QuizQuestion; index: number
   )
 }
 
-export function Quiz({ questions }: { questions: QuizQuestion[] }) {
-  const [results, setResults] = useState<Record<number, boolean>>({})
+export function Quiz({ questions, lessonId }: { questions: QuizQuestion[]; lessonId: string }) {
+  // Include question content to invalidate answers when the quiz changes.
+  const storageKey = `quiz.${lessonId}.${JSON.stringify(questions)}`
+  const [results, setResults] = useState<Record<number, number>>(() => readProgress(storageKey,
+    (v): v is Record<number, number> => isRecord(v) && Object.entries(v).every(([key, answer]) => {
+      const i = Number(key)
+      return Number.isInteger(i) && i >= 0 && i < questions.length && typeof answer === 'number' && Number.isInteger(answer) && answer >= 0 && answer < questions[i].options.length
+    })) ?? {})
+  function saveResults(next: Record<number, number>) {
+    setResults(next)
+    writeProgress(storageKey, next)
+  }
   const [round, setRound] = useState(0)
   const answered = Object.keys(results).length
-  const score = Object.values(results).filter(Boolean).length
+  const score = Object.entries(results).filter(([i, answer]) => answer === questions[Number(i)].answer).length
   const finished = answered === questions.length
 
   return (
     <div className="card" style={{ overflow: 'hidden' }}>
       {questions.map((q, i) => (
-        <Question key={`${round}-${i}`} item={q} index={i} onResult={(ok) => setResults((r) => ({ ...r, [i]: ok }))} />
+        <Question key={`${round}-${i}`} item={q} index={i} saved={results[i]} onResult={(answer) => saveResults({ ...results, [i]: answer })} />
       ))}
       <div style={{ padding: '14px 20px', borderTop: '1.5px solid var(--border)', background: 'var(--panel-2)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <span style={{ fontWeight: 600 }}>
@@ -103,7 +115,7 @@ export function Quiz({ questions }: { questions: QuizQuestion[] }) {
             className="btn"
             style={{ marginLeft: 'auto' }}
             onClick={() => {
-              setResults({})
+              saveResults({})
               setRound((r) => r + 1)
             }}
           >

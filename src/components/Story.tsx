@@ -2,13 +2,20 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { AlertTriangle, Info, Lightbulb, Sparkles } from 'lucide-react'
 import type { Tone } from './Diagram'
 
+import { readProgress, writeProgress } from '../lib/storage'
+
 export type StorySection = { title: string; body: ReactNode }
 
 /**
  * Scroll-driven lesson: text on the left, a sticky animated scene on the right.
  * The scene receives the index of the section currently in the middle of the screen.
  */
-export function ScrollStory({ sections, Scene }: { sections: StorySection[]; Scene: ComponentType<{ step: number }> }) {
+export function ScrollStory({ sections, Scene, lessonId }: { lessonId: string; sections: StorySection[]; Scene: ComponentType<{ step: number }> }) {
+  const storageKey = `story.${lessonId}`
+  const [resume] = useState(() => readProgress(storageKey, (v): v is string => typeof v === 'string'))
+  const resumeIndex = sections.findIndex((section) => section.title === resume)
+  const [showResume, setShowResume] = useState(resumeIndex > 0)
+  const awaitingResume = useRef(resumeIndex > 0)
   const [active, setActive] = useState(0)
   const refs = useRef<(HTMLElement | null)[]>([])
 
@@ -16,7 +23,15 @@ export function ScrollStory({ sections, Scene }: { sections: StorySection[]; Sce
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          if (e.isIntersecting) setActive(Number((e.target as HTMLElement).dataset.idx))
+          if (e.isIntersecting) {
+            const index = Number((e.target as HTMLElement).dataset.idx)
+            setActive(index)
+            // Do not erase the saved position just because the lesson initially opens at its top.
+            if (index > 0 || !awaitingResume.current) {
+              awaitingResume.current = false
+              writeProgress(storageKey, sections[index].title)
+            }
+          }
         }
       },
       // A thin band across the middle of the viewport decides which section is "current".
@@ -24,13 +39,19 @@ export function ScrollStory({ sections, Scene }: { sections: StorySection[]; Sce
     )
     refs.current.forEach((el) => el && io.observe(el))
     return () => io.disconnect()
-  }, [sections.length])
+  }, [sections, storageKey])
 
   function jump(i: number) {
+    awaitingResume.current = false
+    writeProgress(storageKey, sections[i].title)
     refs.current[i]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 
   return (
+    <>
+      {showResume && <button className="btn" style={{ marginBottom: 16 }} onClick={() => { jump(resumeIndex); setShowResume(false) }}>
+        Resume part {resumeIndex + 1}: {sections[resumeIndex].title}
+      </button>}
     <div className="story">
       <div className="story-text">
         {sections.map((s, i) => (
@@ -65,6 +86,7 @@ export function ScrollStory({ sections, Scene }: { sections: StorySection[]; Sce
         </div>
       </div>
     </div>
+    </>
   )
 }
 

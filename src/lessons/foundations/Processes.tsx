@@ -7,6 +7,7 @@ import { At, Box, Bubble, Card, Envelope, FileIcon, Link, Mover, Scene, Tag, Txt
 import { bouncy } from '../../lib/motion'
 import type { Tone } from '../../components/Diagram'
 import { useLoop } from '../../lib/useLoop'
+import { scenarios } from './ProcessesSims'
 
 function Headline({ children }: { children: string }) {
   return (
@@ -791,6 +792,10 @@ $ journalctl -u myapp --since "10 min ago"`}</Shell>
   },
   Playground: SystemctlSim,
   playgroundIntro: 'You manage a service called myapp. Start, stop, crash and reboot it, and watch what systemd does and logs.',
+  simulation: {
+    intro: 'Broken services and runaway processes on real-feeling servers. systemctl, journalctl, ps, top, kill, ss and curl all work.',
+    scenarios,
+  },
   terms: [
     { term: 'Process', def: 'A running instance of a program, with its own PID and memory.' },
     { term: 'PID', def: 'Process ID, the unique number of a process.' },

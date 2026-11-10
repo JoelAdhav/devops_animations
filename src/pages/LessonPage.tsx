@@ -1,9 +1,11 @@
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { ArrowLeft, ArrowRight, BookOpen, Check, Clapperboard, Clock, Gamepad2, ListChecks, MessagesSquare, Terminal, TerminalSquare } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import type { Lesson } from '../lessons/types'
+import type { LessonEntry } from '../lessons/registry'
 import { findLesson, lessons } from '../lessons/registry'
-import { toggleCompleted, useCompleted } from '../lib/storage'
+import { toggleCompleted, useCompleted, saveLastLesson } from '../lib/storage'
 import { ScrollStory } from '../components/Story'
 import { Quiz } from '../components/Quiz'
 import { SimLab } from '../components/SimLab'
@@ -31,9 +33,6 @@ function Block({ icon, tone, title, intro, children }: { icon: ReactNode; tone: 
 export default function LessonPage() {
   const { id } = useParams()
   const lesson = findLesson(id)
-  const completed = useCompleted()
-  const [params, setParams] = useSearchParams()
-
   if (!lesson) {
     return (
       <div>
@@ -47,13 +46,37 @@ export default function LessonPage() {
     )
   }
 
-  const index = lessons.indexOf(lesson)
+  return <LessonLoader key={lesson.id} entry={lesson} />
+}
+
+function LessonLoader({ entry }: { entry: LessonEntry }) {
+  const [lesson, setLesson] = useState<Lesson | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let active = true
+    entry.load().then(
+      content => { if (active) setLesson({ ...content, track: entry.track }) },
+      () => { if (active) setFailed(true) },
+    )
+    return () => { active = false }
+  }, [entry, attempt])
+  if (failed) return <div role="alert"><h1>Could not load this lesson</h1><p>Check your connection and try again.</p><button className="btn" onClick={() => { setFailed(false); setAttempt(n => n + 1) }}>Try again</button></div>
+  if (!lesson) return <p role="status">Loading {entry.title}...</p>
+  return <LessonContent lesson={lesson} />
+}
+
+function LessonContent({ lesson }: { lesson: Lesson }) {
+  const completed = useCompleted()
+  const [params, setParams] = useSearchParams()
+  const index = lessons.findIndex(entry => entry.id === lesson.id)
   const prev = lessons[index - 1]
   const next = lessons[index + 1]
   const isDone = completed.includes(lesson.id)
   const { Playground, story, simulation } = lesson
   const Icon = lesson.icon
   const tab = simulation && params.get('tab') === 'sim' ? 'sim' : 'learn'
+  useEffect(() => { saveLastLesson(lesson.id, tab) }, [lesson.id, tab])
   const tabs = [
     { id: 'learn', label: 'Animation', icon: Clapperboard, note: story ? `${story.sections.length} parts` : undefined },
     { id: 'sim', label: 'Simulation', icon: TerminalSquare, note: simulation ? `${simulation.scenarios.length} tickets` : undefined },
@@ -105,7 +128,7 @@ export default function LessonPage() {
 
       {tab === 'sim' && simulation && (
         <Block icon={<TerminalSquare size={20} />} tone="rose" title="Real-world tickets" intro={simulation.intro}>
-          <SimLab key={lesson.id} scenarios={simulation.scenarios} />
+          <SimLab lessonId={lesson.id} key={lesson.id} scenarios={simulation.scenarios} />
         </Block>
       )}
 
@@ -113,7 +136,7 @@ export default function LessonPage() {
         <>
 
       {/* key forces fresh state when switching lessons */}
-      {story && <ScrollStory key={lesson.id} sections={story.sections} Scene={story.Scene} />}
+      {story && <ScrollStory lessonId={lesson.id} key={lesson.id} sections={story.sections} Scene={story.Scene} />}
 
       {Playground && (
         <Block
@@ -141,7 +164,7 @@ export default function LessonPage() {
 
       {lesson.quiz && (
         <Block icon={<ListChecks size={20} />} tone="green" title="Check yourself" intro="Quick questions. Each answer explains why.">
-          <Quiz key={lesson.id} questions={lesson.quiz} />
+          <Quiz lessonId={lesson.id} key={lesson.id} questions={lesson.quiz} />
         </Block>
       )}
 
